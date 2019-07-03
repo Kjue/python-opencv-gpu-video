@@ -30,7 +30,17 @@ while not video.stopped:
     img = hsv.get()   # image is now a numpy array
 ```
 
-The example above runs all the OpenCV methods in a dedicated GPU if one is available. Any methods that are called similarly with the matrices as source and target specified as ```UMat``` types then OpenCV will be able to utilize GPU for them. This is a bare example only showing simple operations on the images.
+The example above runs all the OpenCV methods in a dedicated GPU if one is available. Any methods that are called similarly with the matrices as source and target specified as ```UMat``` types then OpenCV will be able to utilize GPU for them. This is a bare example only showing simple operations on the images. The tricky part for me to figure out was how to call the operations from Python as I had trouble getting this to work as member function calls like:
+
+```py
+frame = frame.cvtColor(cv2.COLOR_RGB2HSV)
+```
+
+The way to call it is to use the static functions available to Python as well. Instead of assigning to a variable the result of a member function we call the static method with parameters for source image, function specific parameters, target image and any other necessary parameters defined by the method. These will be very similar to the C-api. Resulting call is like:
+
+```py
+cv2.cvtColor(frame, cv2.COLOR_RGB2HSV, hsv, 0)
+```
 
 User should call the ```read()``` method only once for the read and then use the reference further from that call. The reference ```UMat``` will be overwritten immediately after so it should in fact be part of a call to read the image data to another ```UMat``` image preferably. The bytes are in GPU-memory already so any copy operations will be fast.
 
@@ -40,7 +50,7 @@ When you need to fetch the image from the GPU-memory back to CPU for i.e. serial
 
 ### *Reasoning*
 
-I had a use case to process the video faster than that and I had to run image operations on all the frames and I wanted to do that in the GPU for speed purposes. I had previously used ffmpeg with NVENC extensions very successfully to run encoding on GPU. I was able to achieve speeds in excess of 8.0x speeds to the input video in encoding, so you should understand I was frustrated at the appalling 0.2x speeds I was getting with my first code on the algorithm I needed to execute.
+I had a use case to process the video faster than that and **I had to run image operations on all the frames** and I wanted to **do that in the GPU** for speed purposes. I had previously used ffmpeg with NVidia extensions (*NVENC*) very successfully to run encoding on GPU. I was able to achieve speeds in excess of 8.0x speeds to the input video in encoding, so you should understand I was frustrated at the appalling 0.2x speeds I was getting with my first code on the algorithm I needed to execute. I am still wishing to find a way to allow this code to attain similar levels.
 
 I would need speed gains from somewhere as this situation was forcing my computer to be very busy for the 5 hours it took to process the 1 hour video pieces. Something had to be done.
 
@@ -66,8 +76,27 @@ So the code started out from the CPU-only code that was able to do the algorithm
 
 I figured it would be good to translate the code to using GPU-code and I was successful at pushing the images to GPU to be handled and I was still short of proper performance. I was able to reach 0.3x speed with this step and it saved me about 1 h in the processing already and it was still near 3 hours.
 
-I thought back to the article I'd read ages ago on PyImageSearch. Threading was a good thing to improve the code. As I ran my tests for the threaded video decoder I was able to raise the performance to another level very nicely. Still using my existing code underneath I managed 0.52x of the normal runtime speed with this and my processing time was at 1:40 h. I knew I could still improve.
+I thought back to the [article](https://www.pyimagesearch.com/2015/02/02/just-open-sourced-personal-imutils-package-series-opencv-convenience-functions/) I'd read ages ago on PyImageSearch. Threading was a good thing to improve the code. As I ran my tests for the threaded video decoder I was able to raise the performance to another level very nicely. Still using my existing code underneath I managed 0.52x of the normal runtime speed with this and my processing time was at 1:40 h. I knew I could still improve.
 
-The final solution came from modifying the library and seeing that I can recycle the matrices in the shared memory where necessary. Some might argue against this but I needed more speed in the now. After the necessary modifications I tested and saw that I was able to achieve near realtime at 0.87x speed of the original runtime of the video. My processing time for the 0:50 h video was now 0:57 h. Mission accomplished.
+The final solution came from modifying the library and seeing that I can recycle the matrices in the shared memory where necessary. Some might argue against this but I needed more speed in the now. The code example below shows the recycling happening in the update step. This omits a lot of the code to demonstrate the trick. The benefit is we reserve the memory up front. The cost to the design is that user can only read the image once as it is being overwritten immediately after. That should be okay as long as user can create a copy they can use.
+
+```py
+def __init__(self, path, queueSize=128):
+    self.Q = Queue(maxsize=queueSize)
+    for ii in range(queueSize):
+        self.frames[ii] = cv2.UMat(self.height, self.width, cv2.CV_8UC3)
+
+def update(self):
+    while True:
+        if not self.Q.full():
+            # Only recycle new frames to existing UMats when user has read it.
+            self.stream.retrieve(self.frames[target])
+            self.Q.put(target)
+
+def read(self):
+    return self.frames[self.Q.get()]
+```
+
+After the necessary modifications I tested and saw that I was able to achieve near realtime at 0.87x speed of the original runtime of the video. My processing time for the 0:50 h video was now 0:57 h. Mission accomplished.
 
 -- Mikael Lavi
